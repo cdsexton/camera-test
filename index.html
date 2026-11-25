@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<!-- Blocks this page from sending anything anywhere. Photos stay on the device. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; media-src blob: mediastream:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<title>Camera Test</title>
+<style>
+  :root { color-scheme: dark; --bg:#111417; --panel:#1b2025; --line:#39424b; --text:#eef2f5; --dim:#a3afb9; --go:#e8b04a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.45 -apple-system, system-ui, sans-serif;
+         padding: max(16px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left)); }
+  main { max-width: 1100px; margin: 0 auto; display: grid; gap: 14px; }
+  h1 { font-size: 22px; margin: 0; } h2 { font-size: 18px; margin: 8px 0 0; }
+  p { margin: 0; color: var(--dim); }
+  .row { display:flex; flex-wrap:wrap; gap:10px; align-items:end; }
+  label { display:grid; gap:4px; font-size:14px; color:var(--dim); min-width:0; }
+  button, select, .btn { font:inherit; min-height:48px; padding:10px 16px; border-radius:10px; border:1px solid var(--line);
+         background:var(--panel); color:var(--text); max-width:100%; cursor:pointer; display:inline-flex; align-items:center; }
+  button.go { background:var(--go); border-color:var(--go); color:#1a1204; font-weight:700; }
+  button:disabled { opacity:.4; }
+  :focus-visible { outline:3px solid #7cc4ff; outline-offset:2px; }
+  #stage { position:relative; background:#000; border-radius:10px; overflow:hidden; aspect-ratio:4/3; width:100%; max-height:72vh; margin:0 auto; }
+  #stage video, #stage svg { position:absolute; inset:0; width:100%; height:100%; }
+  #stage svg { pointer-events:none; }
+  svg [data-guide] { display:none; fill:none; stroke:#ffd27a; stroke-width:5; stroke-dasharray:18 12; }
+  svg [data-guide].on { display:block; }
+  #status { color:var(--text); min-height:1.5em; } #status.err { color:#ff9b8f; }
+  .info { font:14px/1.5 ui-monospace, Menlo, monospace; background:var(--panel); padding:10px 12px; border-radius:10px; overflow-wrap:anywhere; }
+  .shots { display:grid; gap:14px; grid-template-columns:repeat(auto-fill, minmax(min(100%, 300px), 1fr)); }
+  .shot { background:var(--panel); border-radius:10px; padding:10px; display:grid; gap:8px; align-content:start; }
+  .view { overflow:auto; max-height:360px; border-radius:6px; background:#000; -webkit-overflow-scrolling:touch; }
+  .view img { display:block; width:100%; } .view.full img { width:auto; max-width:none; }
+  .view.full { touch-action: pan-x pan-y; }
+  input[type=file] { position:absolute; opacity:0; width:1px; height:1px; }
+  .btn:focus-within { outline:3px solid #7cc4ff; outline-offset:2px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Camera Test</h1>
+  <p>Photos stay on this device. Save any you want to keep before closing the page.</p>
+
+  <div class="row">
+    <label>Resolution to ask for
+      <select id="res">
+        <option value="4032x3024">Largest 4:3</option>
+        <option value="3840x2160">4K 16:9</option>
+        <option value="1920x1080">1080p 16:9</option>
+      </select>
+    </label>
+    <label>Camera <select id="cam"><option value="">Default rear camera</option></select></label>
+    <label>Shot type
+      <select id="kind">
+        <option value="exterior">Exterior</option>
+        <option value="interior">Dim interior</option>
+        <option value="screen">Lit screen</option>
+        <option value="none">No outline</option>
+      </select>
+    </label>
+    <button id="start" class="go" type="button">Start camera</button>
+  </div>
+
+  <div id="stage">
+    <video id="video" playsinline muted autoplay></video>
+    <svg viewBox="0 0 1000 750" preserveAspectRatio="none" aria-hidden="true">
+      <g data-guide="exterior"><path d="M90 520 L90 420 Q95 375 150 360 L280 335 L390 235 Q410 218 450 218 L690 218 Q730 218 755 242 L835 335 Q905 350 915 400 L915 520 Z"/><circle cx="265" cy="520" r="70"/><circle cx="755" cy="520" r="70"/></g>
+      <g data-guide="interior"><rect x="80" y="80" width="840" height="590" rx="30"/><path d="M80 330 Q500 260 920 330"/><circle cx="320" cy="440" r="115"/></g>
+      <g data-guide="screen"><rect x="180" y="190" width="640" height="370" rx="20"/></g>
+    </svg>
+  </div>
+
+  <div class="row">
+    <button id="snap" class="go" type="button" disabled>Take photo</button>
+    <label class="btn">Add Camera app photo<input id="pick" type="file" accept="image/*" multiple></label>
+  </div>
+  <p id="status" role="status">Tap Start camera and allow access.</p>
+  <div id="info" class="info">Camera not started.</div>
+
+  <h2>Photos</h2>
+  <p>Use Actual pixels to compare sharpness. The outline is never saved in the photo.</p>
+  <div id="shots" class="shots"></div>
+</main>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const video = $('video');
+  let stream = null, busy = false, request = 0;
+
+  const say = (msg, err) => { $('status').textContent = msg; $('status').classList.toggle('err', !!err); };
+  const mp = (w, h) => (w * h / 1e6).toFixed(1) + ' MP';
+  const size = b => b > 1048576 ? (b / 1048576).toFixed(2) + ' MB' : Math.round(b / 1024) + ' KB';
+
+  function stop() {
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    stream = null; video.srcObject = null; $('snap').disabled = true;
+  }
+
+  function showGuide() {
+    document.querySelectorAll('[data-guide]').forEach(g => g.classList.toggle('on', g.dataset.guide === $('kind').value));
+  }
+
+  function fit() {
+    const w = video.videoWidth, h = video.videoHeight;
+    if (!w) return;
+    $('stage').style.aspectRatio = w + '/' + h;
+    $('stage').style.maxWidth = 'calc(72vh * ' + (w / h) + ')';
+    $('stage').style.maxHeight = 'none';
+    const s = stream ? stream.getVideoTracks()[0].getSettings() : {};
+    let caps = {};
+    try { caps = stream.getVideoTracks()[0].getCapabilities(); } catch (e) {}
+    $('info').textContent = 'Live: ' + w + ' x ' + h + ' (' + mp(w, h) + ')' +
+      ' | Camera max: ' + ((caps.width && caps.width.max) || '?') + ' x ' + ((caps.height && caps.height.max) || '?') +
+      ' | Facing: ' + (s.facingMode || '?') + ' | Frame rate: ' + (s.frameRate ? Math.round(s.frameRate) : '?');
+  }
+
+  async function listCams() {
+    const cams = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+    const cur = $('cam').value;
+    $('cam').replaceChildren(new Option('Default rear camera', ''), ...cams.map((c, i) => new Option(c.label || 'Camera ' + (i + 1), c.deviceId)));
+    if (cams.some(c => c.deviceId === cur)) $('cam').value = cur;
+  }
+
+  async function start() {
+    if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia)
+      return say('The camera needs a secure (https) page in a current browser.', true);
+    const mine = ++request;
+    stop(); say('Starting camera...');
+    const [w, h] = $('res').value.split('x').map(Number);
+    const v = { width: { ideal: w }, height: { ideal: h } };
+    if ($('cam').value) v.deviceId = { exact: $('cam').value }; else v.facingMode = { ideal: 'environment' };
+    try {
+      const s = await navigator.mediaDevices.getUserMedia({ video: v, audio: false });
+      if (mine !== request) { s.getTracks().forEach(t => t.stop()); return; }
+      stream = s;
+      s.getVideoTracks()[0].addEventListener('ended', () => { if (stream === s) { stop(); say('The camera stopped. Tap Start camera.', true); } });
+      video.srcObject = s;
+      await video.play();
+      if (mine !== request) return;
+      fit(); await listCams();
+      if (mine !== request) return;
+      $('start').textContent = 'Restart camera'; $('snap').disabled = false; say('Camera ready.');
+    } catch (e) {
+      if (mine !== request) return;
+      stop();
+      say(e.name === 'NotAllowedError' ? 'Camera access was blocked. Allow it in Safari settings for this site, then tap Start camera.' : 'Camera could not start: ' + e.name + ' ' + e.message, true);
+    }
+  }
+
+  async function addCard(blob, name, source, note) {
+    const url = URL.createObjectURL(blob);
+    const img = new Image(); img.alt = source + ' photo'; img.src = url;
+    try { await img.decode(); } catch (e) { URL.revokeObjectURL(url); return say('Could not open ' + name + '.', true); }
+    const card = document.createElement('div'); card.className = 'shot';
+    const view = document.createElement('div'); view.className = 'view'; view.tabIndex = 0; view.append(img);
+    const text = document.createElement('div');
+    text.textContent = source + ': ' + img.naturalWidth + ' x ' + img.naturalHeight + ' (' + mp(img.naturalWidth, img.naturalHeight) + '), ' + size(blob.size) + (note ? ', ' + note : '');
+    const row = document.createElement('div'); row.className = 'row';
+    const btn = (label, fn) => { const b = document.createElement('button'); b.type = 'button'; b.textContent = label; b.onclick = () => fn(b); row.append(b); };
+    btn('Actual pixels', b => {
+      const full = view.classList.toggle('full'); b.textContent = full ? 'Fit' : 'Actual pixels';
+      if (full) { img.style.width = img.naturalWidth / devicePixelRatio + 'px'; view.scrollLeft = (view.scrollWidth - view.clientWidth) / 2; view.scrollTop = (view.scrollHeight - view.clientHeight) / 2; }
+      else img.style.width = '';
+    });
+    if (source === 'Test page') btn('Save', async () => {
+      const file = new File([blob], name, { type: blob.type });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        try { await navigator.share({ files: [file] }); } catch (e) { if (e.name !== 'AbortError') say('Could not save: ' + e.message, true); }
+      } else { const a = document.createElement('a'); a.href = url; a.download = name; a.click(); }
+    });
+    btn('Remove', () => { card.remove(); URL.revokeObjectURL(url); });
+    card.append(view, text, row); $('shots').prepend(card);
+  }
+
+  async function snap() {
+    if (busy || !stream || !video.videoWidth) return;
+    busy = true; $('snap').disabled = true;
+    try {
+      const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
+      c.getContext('2d').drawImage(video, 0, 0);
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+      c.width = c.height = 0;
+      if (!blob) throw new Error('the browser returned no image');
+      const kind = $('kind').value, stamp = new Date().toISOString().replace(/[:.]/g, '-');
+      await addCard(blob, 'test-' + kind + '-' + video.videoWidth + 'x' + video.videoHeight + '-' + stamp + '.jpg', 'Test page', kind);
+      say('Photo taken.');
+    } catch (e) { say('Photo failed: ' + e.message, true); }
+    finally { busy = false; $('snap').disabled = !stream; }
+  }
+
+  $('start').onclick = start; $('snap').onclick = snap; $('kind').onchange = showGuide;
+  $('res').onchange = $('cam').onchange = () => { if (stream) start(); };
+  $('pick').onchange = async e => { for (const f of [...e.target.files]) await addCard(f, f.name, 'Camera app', f.name); e.target.value = ''; };
+  video.addEventListener('resize', fit);
+  document.addEventListener('visibilitychange', () => { if (document.hidden && stream) { request++; stop(); say('Camera paused. Tap Restart camera.'); } });
+  showGuide();
+})();
+</script>
+</body>
+</html>
