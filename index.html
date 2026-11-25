@@ -7,7 +7,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <!-- Blocks this page from sending anything anywhere. Photos stay on the device. -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; media-src blob: mediastream:; connect-src 'none'; form-action 'none'; base-uri 'none'">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src blob: data:; media-src blob: mediastream:; connect-src 'none'; worker-src 'self'; form-action 'none'; base-uri 'none'">
 <title>Camera Test</title>
 <style>
   :root { color-scheme: dark; --bg:#111417; --panel:#1b2025; --line:#39424b; --text:#eef2f5; --dim:#a3afb9; --go:#e8b04a; }
@@ -43,7 +43,7 @@
 <body>
 <main>
   <h1>Camera Test</h1>
-  <p>Photos stay on this device. Save any you want to keep before closing the page.</p>
+  <p>Photos stay on this device. Save a copy of any you want to keep; this is a test and its storage may be erased.</p>
 
   <div class="row">
     <label>Resolution to ask for
@@ -80,6 +80,22 @@
   </div>
   <p id="status" role="status">Tap Start camera and allow access.</p>
   <div id="info" class="info">Camera not started.</div>
+
+  <h2>Storage test</h2>
+  <p>Uses fake photo-size files (4 MB each) plus the photos you take. Write down the file count before closing the page.</p>
+  <div id="store" class="info">Checking storage...</div>
+  <div class="row">
+    <button id="persist" type="button">Ask for protected storage</button>
+    <button id="fill26" type="button">Add 26 files (104 MB)</button>
+    <button id="fill260" type="button">Add 260 files (1 GB)</button>
+    <button id="stopfill" type="button" disabled>Stop</button>
+  </div>
+  <div class="row">
+    <button id="verify" type="button" class="go">Check all stored files</button>
+    <button id="showstored" type="button">Show stored photos</button>
+    <button id="wipe" type="button">Clear test files</button>
+  </div>
+  <p id="sstatus" role="status"></p>
 
   <h2>Photos</h2>
   <p>Use Actual pixels to compare sharpness. The outline is never saved in the photo.</p>
@@ -167,7 +183,7 @@
       if (full) { img.style.width = img.naturalWidth / devicePixelRatio + 'px'; view.scrollLeft = (view.scrollWidth - view.clientWidth) / 2; view.scrollTop = (view.scrollHeight - view.clientHeight) / 2; }
       else img.style.width = '';
     });
-    if (source === 'Test page') btn('Save', async () => {
+    if (source === 'Test page') btn('Save copy', async () => {
       const file = new File([blob], name, { type: blob.type });
       if (navigator.canShare && navigator.canShare({ files: [file] })) {
         try { await navigator.share({ files: [file] }); } catch (e) { if (e.name !== 'AbortError') say('Could not save: ' + e.message, true); }
@@ -184,10 +200,12 @@
       const c = document.createElement('canvas'); c.width = video.videoWidth; c.height = video.videoHeight;
       c.getContext('2d').drawImage(video, 0, 0);
       const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.92));
+      const c0 = c.width + 'x' + c.height;
       c.width = c.height = 0;
       if (!blob) throw new Error('the browser returned no image');
       const kind = $('kind').value, stamp = new Date().toISOString().replace(/[:.]/g, '-');
-      await addCard(blob, 'test-' + kind + '-' + video.videoWidth + 'x' + video.videoHeight + '-' + stamp + '.jpg', 'Test page', kind);
+      const name = 'test-' + kind + '-' + c0 + '-' + stamp + '.jpg';
+      await addCard(blob, name, 'Test page', kind + ', ' + await storePhoto(name, blob));
       say('Photo taken.');
     } catch (e) { say('Photo failed: ' + e.message, true); }
     finally { busy = false; $('snap').disabled = !stream; }
@@ -199,6 +217,110 @@
   video.addEventListener('resize', fit);
   document.addEventListener('visibilitychange', () => { if (document.hidden && stream) { request++; stop(); say('Camera paused. Tap Restart camera.'); } });
   showGuide();
+
+  // ---- Storage test ----
+  const LS = { get: k => { try { return localStorage.getItem(k); } catch (e) { return null; } }, set: (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} } };
+  const ssay = (m, err) => { $('sstatus').textContent = m; $('sstatus').style.color = err ? '#ff9b8f' : ''; };
+  let working = false, halt = false, offline = 'not ready', wipeArmed = 0, dbp = null;
+  const openDb = () => new Promise((ok, no) => {
+    const r = indexedDB.open('camera-test', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('files', { keyPath: 'id', autoIncrement: true });
+    r.onsuccess = () => ok(r.result); r.onerror = () => no(r.error);
+  });
+  const db = () => dbp || (dbp = openDb().then(d => { d.onclose = () => { dbp = null; }; return d; }, e => { dbp = null; throw e; }));
+  async function run(mode, fn) {
+    const d = await db();
+    return new Promise((ok, no) => {
+      const t = d.transaction('files', mode, { durability: mode === 'readwrite' ? 'strict' : 'default' });
+      const r = fn(t.objectStore('files'));
+      t.oncomplete = () => ok(r.result);
+      t.onabort = t.onerror = () => no(t.error || r.error || new Error('storage write failed'));
+    });
+  }
+  const hash = async blob => [...new Uint8Array(await crypto.subtle.digest('SHA-256', await blob.arrayBuffer()))].map(b => b.toString(16).padStart(2, '0')).join('');
+  const expected = () => Number(LS.get('expected') || 0);
+  async function put(kind, name, blob) {
+    const h = await hash(blob);
+    const id = await run('readwrite', s => s.add({ kind, name, blob, size: blob.size, at: Date.now(), hash: h }));
+    LS.set('expected', String(expected() + 1));
+    return id;
+  }
+  async function check(id) {
+    try {
+      const f = await run('readonly', s => s.get(id));
+      return !!f && f.blob.size === f.size && (await hash(f.blob)) === f.hash;
+    } catch (e) { return false; }
+  }
+  async function storePhoto(name, blob) {
+    try { const ok = await check(await put('photo', name, blob)); await showStore(); return ok ? 'stored and verified' : 'STORED BUT DAMAGED'; }
+    catch (e) { return 'NOT STORED: ' + e.name; }
+  }
+  async function showStore() {
+    let n = '?', est = {}, prot = '?';
+    try { n = await run('readonly', s => s.count()); } catch (e) { n = 'error ' + e.name; }
+    try { est = await navigator.storage.estimate(); } catch (e) {}
+    try { prot = (await navigator.storage.persisted()) ? 'yes' : 'no'; } catch (e) {}
+    const home = navigator.standalone === true || matchMedia('(display-mode: standalone)').matches;
+    $('store').textContent = 'Stored files: ' + n + ' | Expected: ' + expected() + ' | Protected: ' + prot +
+      ' | Used: ' + (est.usage != null ? size(est.usage) : '?') + ' of ' + (est.quota ? (est.quota / 1073741824).toFixed(1) + ' GB allowed' : '?') +
+      ' | Opened from: ' + (home ? 'Home screen' : 'browser tab') + ' | Offline copy: ' + offline + ' | Network: ' + (navigator.onLine ? 'online' : 'offline');
+  }
+  const jobButtons = ['fill26', 'fill260', 'verify', 'showstored', 'wipe', 'persist'];
+  async function job(fn) {
+    if (working) return;
+    working = true; halt = false;
+    jobButtons.forEach(i => { $(i).disabled = true; }); $('stopfill').disabled = false;
+    try { await fn(); } catch (e) { ssay('Storage problem: ' + e.name + ' ' + e.message, true); }
+    finally { working = false; jobButtons.forEach(i => { $(i).disabled = false; }); $('stopfill').disabled = true; await showStore(); }
+  }
+  const fill = count => job(async () => {
+    const t0 = performance.now(); let i = 0;
+    try {
+      for (; i < count && !halt; i++) {
+        const buf = new Uint8Array(4 * 1024 * 1024);
+        for (let o = 0; o < buf.length; o += 65536) crypto.getRandomValues(buf.subarray(o, o + 65536));
+        await put('fill', 'fill', new Blob([buf], { type: 'application/octet-stream' }));
+        if (i % 5 === 0) { ssay('Stored ' + (i + 1) + ' of ' + count + '...'); await showStore(); }
+      }
+      ssay((halt ? 'Stopped. ' : 'Done. ') + 'Added ' + i + ' files in ' + Math.round((performance.now() - t0) / 1000) + ' s.');
+    } catch (e) { ssay('Stopped at ' + i + ' of ' + count + ': ' + e.name + ' ' + e.message, true); }
+  });
+  $('fill26').onclick = () => fill(26);
+  $('fill260').onclick = () => fill(260);
+  $('stopfill').onclick = () => { halt = true; };
+  $('verify').onclick = () => job(async () => {
+    const ids = await run('readonly', s => s.getAllKeys()); let good = 0, bad = 0;
+    for (const id of ids) {
+      if (halt) break;
+      if (await check(id)) good++; else bad++;
+      if ((good + bad) % 10 === 0) ssay('Checked ' + (good + bad) + ' of ' + ids.length + '...');
+    }
+    const missing = Math.max(0, expected() - ids.length);
+    ssay((halt ? 'Stopped early. ' : '') + 'Good: ' + good + '. Damaged: ' + bad + '. Missing: ' + missing + '.' +
+      (!ids.length && !expected() ? ' Nothing is stored. If you stored files and did not clear them, everything was wiped.' : ''), bad > 0 || missing > 0);
+  });
+  $('showstored').onclick = () => job(async () => {
+    const ids = await run('readonly', s => s.getAllKeys()); let n = 0;
+    for (const id of ids) {
+      if (halt) break;
+      const f = await run('readonly', s => s.get(id));
+      if (f && f.kind === 'photo') { await addCard(f.blob, f.name, 'Test page', 'from storage'); n++; }
+    }
+    ssay('Loaded ' + n + ' stored photos.');
+  });
+  $('wipe').onclick = () => {
+    if (Date.now() - wipeArmed > 4000) { wipeArmed = Date.now(); ssay('Tap Clear test files again to erase all stored photos and test files.', true); return; }
+    wipeArmed = 0;
+    job(async () => { await run('readwrite', s => s.clear()); LS.set('expected', '0'); ssay('Cleared.'); });
+  };
+  $('persist').onclick = async () => {
+    try { ssay((await navigator.storage.persist()) ? 'Protected storage granted.' : 'Protected storage was not granted.'); } catch (e) { ssay('Not supported here.', true); }
+    showStore();
+  };
+  addEventListener('online', showStore); addEventListener('offline', showStore);
+  if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').then(() => navigator.serviceWorker.ready).then(() => { offline = 'ready'; showStore(); }, () => { offline = 'failed'; showStore(); });
+  else offline = 'not supported';
+  showStore();
 })();
 </script>
 </body>
